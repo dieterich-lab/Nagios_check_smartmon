@@ -1,7 +1,7 @@
 #!/usr/bin/python
 """Nagios plugin for monitoring S.M.A.R.T. status."""
 
-# -*- coding: iso8859-1 -*-
+# -*- coding: utf-8 -*-
 #
 # $Id: version.py 133 2006-03-24 10:30:20Z fuller $
 #
@@ -83,7 +83,7 @@ def parse_cmd_line(arguments):
         action="store",
         type="int",
         dest="warning_temp",
-        default=55,
+        default=45,
         help=("set temperature warning threshold to given temperature"
               " (default:55)"))
     parser.add_option(
@@ -93,7 +93,7 @@ def parse_cmd_line(arguments):
         action="store",
         type="int",
         dest="critical_temp",
-        default="60",
+        default="50",
         help=("set temperature critical threshold to given temperature"
               " (default:60)"))
     parser.add_option(
@@ -151,8 +151,8 @@ def call_smartmontools(path, device, raid):
     vprint(3, "Get device health status: %s" % cmd)
     if (raid > 0):
     	vprint(3, "Using megaraid extension with disk %d" % raid)
-	cmd = "%s -d sat+megaraid,%s -a %s" % (path, raid, device)
-	print cmd
+	cmd = "%s -d megaraid,%s -a %s" % (path, raid, device)
+	vprint(3, cmd)
     result = ""
     message = ""
     code_to_return = 0
@@ -165,7 +165,8 @@ def call_smartmontools(path, device, raid):
             # bit 0 is set - command line did not parse
             # output is not useful now, simply return
             message += "UNKNOWN: smartctl parsing error "
-            return_code -= 2**0
+            result = error.output
+	    return_code -= 2**0
             code_to_return = 3
         if return_code % 2**2 > 0:
             # bit 1 is set - device open failed
@@ -179,7 +180,7 @@ def call_smartmontools(path, device, raid):
             # to cleanly end with status 0 
             # bit 2 is set - some smart or ata command failed
             # we still want to see what the output says
-            #result = error.output
+            result = error.output
             #message += "CRITICAL: some SMART or ATA command to disk "
             #message += "failed "
             return_code -= 2**2
@@ -241,11 +242,20 @@ def parse_output(output, warning_temp, critical_temp):
     current_pending_sector = 0
     offline_uncorrectable = 0
     error_count = 0
+    read_error_count = 0
+    write_error_count = 0
+    verify_error_count = 0
+    wear_leveling_count = 0    
 
     lines = output.split("\n")
     for line in lines:
         # extract status line
         if "overall-health self-assessment test result" in line:
+            status_line = line
+            parts = status_line.rstrip().split()
+            health_status = parts[-1:][0]
+            vprint(3, "Health status: %s" % health_status)
+	elif "Health Status" in line:
             status_line = line
             parts = status_line.rstrip().split()
             health_status = parts[-1:][0]
@@ -262,7 +272,12 @@ def parse_output(output, warning_temp, critical_temp):
                 # 5 is the reallocated_sector_ct id
                 reallocated_sector_ct = int(parts[9])
                 vprint(3, "Reallocated_Sector_Ct: %d" % reallocated_sector_ct)
-            elif parts[0] == "194" and temperature == 0:
+            elif parts[0] == "177" and wear_leveling_count == 0:
+                # extract wear level
+                # 177 is the temperature value id (at least for samsung)
+                wear_leveling_count = int(parts[9])
+                vprint(3, "Wear Level: %d" % wear_leveling_count)
+	    elif parts[0] == "194" and temperature == 0:
                 # extract temperature
                 # 194 is the temperature value id
                 temperature = int(parts[9])
@@ -298,6 +313,35 @@ def parse_output(output, warning_temp, critical_temp):
                 vprint(
                     3,
                     "ATA error count: 0")
+		### Stuff for the HGST HUS726040AL5210 drives in the BeeGFS servers
+		### They do not seem to return normal SMART values behind the LSI
+		### controlleri
+            elif "Current Drive Temperature:" in line:
+                temperature = int(parts[3])
+                vprint(
+                    3,
+                    "Drive Temperature: %d" % temperature)
+            elif "Non-medium error count:" in line:
+                error_count = int(parts[3])
+                vprint(
+                    3,
+                    "Non-medium error count: %d" % error_count)
+            elif "read:" in line:
+                read_error_count = int(parts[7])
+                vprint(
+                    3,
+                    "Uncorrected read errors: %d" % read_error_count)
+            elif "write:" in line:
+                write_error_count = int(parts[7])
+                vprint(
+                    3,
+                    "Uncorrected write errors: %d" % write_error_count)
+            elif "verify:" in line:
+                verify_error_count = int(parts[7])
+                vprint(
+                    3,
+                    "Uncorrected verify errors: %d" % verify_error_count)
+
 
     # now create the return information for this device
     return_status = 0
@@ -308,9 +352,9 @@ def parse_output(output, warning_temp, critical_temp):
         return (3, "UNKNOWN: could not parse output")
 
     # check health status
-    if health_status != "PASSED":
+    if health_status != "PASSED" and health_status != "OK" :
         return_status = 2
-        device_status += "CRITICAL: device does not pass health status "
+        device_status += "CRITICAL: device does not pass health status:  %s " % health_status
 
     # check sectors
     if reallocated_sector_ct > 0 or \
@@ -324,6 +368,16 @@ def parse_output(output, warning_temp, critical_temp):
         device_status += "Reallocated_Event_Count:%d, " % reallocated_event_count
         device_status += "Current_Pending_Sector:%d, " % current_pending_sector
         device_status += "Offline_Uncorrectable:%d " % offline_uncorrectable
+
+    # check wear level: criticial
+    if wear_leveling_count > 50:
+        return_status = 2
+        device_status += "CRITICAL: Wear level reached %d " % wear_leveling_count
+
+    # check wear level: warning
+    if wear_leveling_count > 20:
+        return_status = 1
+        device_status += "WARNING: Wear level reached %d " % wear_leveling_count
 
     # check temperature
     if temperature > critical_temp:
@@ -347,8 +401,12 @@ def parse_output(output, warning_temp, critical_temp):
 
     if return_status == 0:
         # no warnings or errors, report everything is ok
-        device_status = "OK: device  is functional and stable "
-        device_status += "(temperature: %d) " % temperature
+	if temperature > 0:
+        	device_status = "OK [temperature: %d] " % temperature
+	elif  temperature > 0 and wear_leveling_count > 0:
+		device_status = "OK [temperature: %d | wear level: %d] " % (temperature, wear_leveling_count)
+	elif  temperature == 0 and wear_leveling_count > 0:
+		device_status = "OK [wear level: %d] " %  wear_leveling_count
 
     return (return_status, device_status)
 
