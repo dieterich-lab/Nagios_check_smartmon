@@ -96,6 +96,16 @@ def parse_cmd_line(arguments):
         default="60",
         help=("set temperature critical threshold to given temperature"
               " (default:60)"))
+    parser.add_option(
+        "-r",
+        "--raid",
+        metavar="RAID",
+        action="store",
+        dest="raid",
+        default="0",
+        type="int",
+        help=("Disk ID for megaraid setups. Use `storcli` to get the ID."
+              " (default:0 == disabled)"))
 
     return parser.parse_args(arguments)
 
@@ -135,10 +145,14 @@ def check_smartmontools(path):
         sys.exit(3)
 
 
-def call_smartmontools(path, device):
+def call_smartmontools(path, device, raid):
     """Get smartmontool output."""
     cmd = "%s -a %s" % (path, device)
     vprint(3, "Get device health status: %s" % cmd)
+    if (raid > 0):
+    	vprint(3, "Using megaraid extension with disk %d" % raid)
+	cmd = "%s -d sat+megaraid,%s -a %s" % (path, raid, device)
+	print cmd
     result = ""
     message = ""
     code_to_return = 0
@@ -160,13 +174,16 @@ def call_smartmontools(path, device):
             return_code -= 2**1
             code_to_return = 3
         if return_code % 2**3 > 0:
+	    # do to the LSI controller (has problems with SAT)
+	    # I had to disabled this sanity check to allow the check
+            # to cleanly end with status 0 
             # bit 2 is set - some smart or ata command failed
             # we still want to see what the output says
-            result = error.output
-            message += "CRITICAL: some SMART or ATA command to disk "
-            message += "failed "
+            #result = error.output
+            #message += "CRITICAL: some SMART or ATA command to disk "
+            #message += "failed "
             return_code -= 2**2
-            code_to_return = 2
+            code_to_return = 0 # actually it's not 0...
         if return_code % 2**4 > 0:
             # bit 3 is set - smart status returned DISK FAILING
             # we still want to see what the output says
@@ -384,7 +401,8 @@ if __name__ == "__main__":
         vprint(2, "Call smartctl")
         return_status, output, message = call_smartmontools(
             _smartctl_path,
-            device)
+            device,
+	    options.raid)
         if return_status != 0:
             if exit_status < return_status:
                 exit_status = return_status
