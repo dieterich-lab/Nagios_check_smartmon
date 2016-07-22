@@ -4,5 +4,5 @@
 int main(int argc, char *argv[]) {
     setreuid(geteuid(), geteuid());
     setregid(getegid(), getegid());
-    return execv("./check_smartmon.py", argv);
+    return execv("/usr/lib/nagios/plugins/check_smartmon.py", argv);
 }
