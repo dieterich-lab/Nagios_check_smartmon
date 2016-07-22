@@ -102,10 +102,10 @@ def parse_cmd_line(arguments):
         metavar="RAID",
         action="store",
         dest="raid",
-        default="0",
+        default="-1",
         type="int",
         help=("Disk ID for megaraid setups. Use `storcli` to get the ID."
-              " (default:0 == disabled)"))
+              " (default:-1 == disabled)"))
 
     return parser.parse_args(arguments)
 
@@ -149,7 +149,7 @@ def call_smartmontools(path, device, raid):
     """Get smartmontool output."""
     cmd = "%s -a %s" % (path, device)
     vprint(3, "Get device health status: %s" % cmd)
-    if (raid > 0):
+    if (raid >= 0):
     	vprint(3, "Using megaraid extension with disk %d" % raid)
 	cmd = "%s -d megaraid,%s -a %s" % (path, raid, device)
 	vprint(3, cmd)
@@ -242,10 +242,12 @@ def parse_output(output, warning_temp, critical_temp):
     current_pending_sector = 0
     offline_uncorrectable = 0
     error_count = 0
+    defect_list = 0
+    non_medium_error_count = 0
     read_error_count = 0
     write_error_count = 0
     verify_error_count = 0
-    wear_leveling_count = 0    
+    wear_leveling_count = -1    
 
     lines = output.split("\n")
     for line in lines:
@@ -272,7 +274,7 @@ def parse_output(output, warning_temp, critical_temp):
                 # 5 is the reallocated_sector_ct id
                 reallocated_sector_ct = int(parts[9])
                 vprint(3, "Reallocated_Sector_Ct: %d" % reallocated_sector_ct)
-            elif parts[0] == "177" and wear_leveling_count == 0:
+            elif parts[0] == "177" and wear_leveling_count == -1:
                 # extract wear level
                 # 177 is the temperature value id (at least for samsung)
                 wear_leveling_count = int(parts[9])
@@ -313,19 +315,21 @@ def parse_output(output, warning_temp, critical_temp):
                 vprint(
                     3,
                     "ATA error count: 0")
-		### Stuff for the HGST HUS726040AL5210 drives in the BeeGFS servers
-		### They do not seem to return normal SMART values behind the LSI
-		### controlleri
+
+	### Stuff for the HGST HUS726040AL5210 drives in the BeeGFS servers
+	### They do not seem to return normal SMART values behind the LSI
+	### controller
+
             elif "Current Drive Temperature:" in line:
                 temperature = int(parts[3])
                 vprint(
                     3,
                     "Drive Temperature: %d" % temperature)
             elif "Non-medium error count:" in line:
-                error_count = int(parts[3])
+                non_medium_error_count = int(parts[3])
                 vprint(
                     3,
-                    "Non-medium error count: %d" % error_count)
+                    "Non-medium error count: %d" % non_medium_error_count)
             elif "read:" in line:
                 read_error_count = int(parts[7])
                 vprint(
@@ -341,6 +345,11 @@ def parse_output(output, warning_temp, critical_temp):
                 vprint(
                     3,
                     "Uncorrected verify errors: %d" % verify_error_count)
+            elif "Grown defect list:" in line:
+                defect_list = int(parts[3])
+                vprint(
+                    3,
+                    "Elements in grown defect list: %d" % defect_list)
 
 
     # now create the return information for this device
@@ -356,10 +365,12 @@ def parse_output(output, warning_temp, critical_temp):
         return_status = 2
         device_status += "CRITICAL: device does not pass health status:  %s " % health_status
 
-    # check sectors
+    # check critical stuff
     if reallocated_sector_ct > 0 or \
             reallocated_event_count > 0 or \
             current_pending_sector > 0 or \
+            non_medium_error_count > 10 or \
+            defect_list > 0 or \
             offline_uncorrectable > 0:
         return_status = 2
         device_status += "CRITICAL: there is a problem with bad sectors "
@@ -368,6 +379,8 @@ def parse_output(output, warning_temp, critical_temp):
         device_status += "Reallocated_Event_Count:%d, " % reallocated_event_count
         device_status += "Current_Pending_Sector:%d, " % current_pending_sector
         device_status += "Offline_Uncorrectable:%d " % offline_uncorrectable
+        device_status += "Non-medium error count:%d, " % non_medium_error_count
+        device_status += "Grown defect list:%d " % defect_list
 
     # check wear level: criticial
     if wear_leveling_count > 50:
@@ -402,11 +415,11 @@ def parse_output(output, warning_temp, critical_temp):
     if return_status == 0:
         # no warnings or errors, report everything is ok
 	if temperature > 0:
-        	device_status = "OK [temperature: %d] " % temperature
+        	device_status = "OK [temperature: %d degree, non-medium-errors: %d] " % (temperature,non_medium_error_count)
 	elif  temperature > 0 and wear_leveling_count > 0:
-		device_status = "OK [temperature: %d | wear level: %d] " % (temperature, wear_leveling_count)
-	elif  temperature == 0 and wear_leveling_count > 0:
-		device_status = "OK [wear level: %d] " %  wear_leveling_count
+		device_status = "OK [temperature: %d degree, wear level: %d percent] " % (temperature, wear_leveling_count)
+	elif  temperature == 0 and wear_leveling_count >= 0:
+		device_status = "OK [wear level: %d percent] " %  wear_leveling_count
 
     return (return_status, device_status)
 
@@ -445,8 +458,10 @@ if __name__ == "__main__":
     exit_status = 0
     for device in devices:
         vprint(1, "Device: %s" % device)
-        return_text += "%s: " % device
-
+        if options.raid > -1:
+		return_text += "%s [RAID ID %d]: " % (device,options.raid)
+	else:
+		return_text += "%s: " % device
         # check if we can access 'path'
         vprint(2, "Check device")
         (return_status, message) = check_device_permissions(device)
